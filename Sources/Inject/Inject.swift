@@ -1,6 +1,4 @@
 import Foundation
-import Combine
-import SwiftUI
 
 /// Common protocol interface for classes that support observing injection events
 /// This is automatically added to all NSObject subclasses like `ViewController`s or `Window`s
@@ -15,7 +13,6 @@ public protocol InjectListener {
 public enum Inject {
     public static let observer = injectionObserver
     public static let load: Void = loadInjectionImplementation
-    public static var animation: SwiftUI.Animation?
 }
 
 public extension InjectListener {
@@ -40,21 +37,33 @@ private var loadInjectionImplementation: Void = {
     Bundle(path: "/Applications/InjectionIII.app/Contents/Resources/" + bundleName)?.load()
 }()
 
-public class InjectionObserver: ObservableObject {
-    @Published public private(set) var injectionNumber = 0
-    private var cancellable: AnyCancellable?
-
+public class InjectionObserver {
+    public private(set) var injectionNumber = 0 {
+        didSet {
+            listeners.forEach { $0.handler() }
+        }
+    }
+    private var token: NSObjectProtocol?
+    private struct Listener {
+        let id = UUID()
+        let handler: () -> Void
+    }
+    private var listeners = [Listener]()
     fileprivate init() {
-        cancellable = NotificationCenter.default.publisher(for: Notification.Name("INJECTION_BUNDLE_NOTIFICATION"))
-            .sink { [weak self] _ in
-                if let animation = Inject.animation {
-                    withAnimation(animation) {
-                        self?.injectionNumber += 1
-                    }
-                } else {
-                    self?.injectionNumber += 1
-                }
+        token = NotificationCenter.default.addObserver(forName: Notification.Name("INJECTION_BUNDLE_NOTIFICATION"), object: nil, queue: nil) { [weak self] _ in
+                self?.injectionNumber += 1
             }
+    }
+    deinit {
+        NotificationCenter.default.removeObserver(token!)
+    }
+
+    fileprivate func addListener(_ handler: @escaping () -> Void) -> NSCancellable {
+        let listener = Listener(handler: handler)
+        listeners.append(listener)
+        return NSCancellable { [weak self, id = listener.id] in
+            self?.listeners.removeAll(where: { $0.id == id })
+        }
     }
 }
 
@@ -63,12 +72,23 @@ private var injectionObservationKey = arc4random()
 
 public extension InjectListener where Self: NSObject {
     func onInjection(callback: @escaping (Self) -> Void) {
-        let observation = injectionObserver.objectWillChange.sink(receiveValue: { [weak self] in
+        let observation = injectionObserver.addListener { [weak self] in
             guard let self = self else { return }
             callback(self)
-        })
+        }
 
         objc_setAssociatedObject(self, &injectionObservationKey, observation, .OBJC_ASSOCIATION_RETAIN)
+    }
+}
+
+private final class NSCancellable: NSObject {
+    private let cancelHandler: () -> Void
+    init(_ cancelHandler: @escaping () -> Void) {
+        self.cancelHandler = cancelHandler
+        super.init()
+    }
+    deinit {
+        cancelHandler()
     }
 }
 
